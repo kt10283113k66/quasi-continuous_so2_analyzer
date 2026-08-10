@@ -8,20 +8,118 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib
 import matplotlib.pyplot as plt
-try:
-    import japanize_matplotlib  # noqa: F401
-except ImportError:
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = [
-        "Noto Sans CJK JP",
-        "IPAexGothic",
-        "IPAGothic",
-        "Yu Gothic",
-        "Meiryo",
-        "DejaVu Sans",
-    ]
-plt.rcParams["axes.unicode_minus"] = False
+from matplotlib import font_manager
+
+JAPANESE_FONT_NAME = None
+
+
+def configure_japanese_matplotlib_font():
+    """
+    Streamlit Cloudでも日本語が文字化けしないよう、
+    japanize-matplotlib同梱のIPAexGothicをMatplotlibへ明示登録する。
+    """
+    global JAPANESE_FONT_NAME
+
+    try:
+        import japanize_matplotlib
+
+        # japanize-matplotlibパッケージ内のfontsフォルダを直接探す。
+        package_dir = Path(japanize_matplotlib.__file__).resolve().parent
+        font_candidates = [
+            package_dir / "fonts" / "ipaexg.ttf",
+            package_dir / "fonts" / "IPAexGothic.ttf",
+        ]
+
+        font_path = next(
+            (path for path in font_candidates if path.exists()),
+            None,
+        )
+
+        if font_path is not None:
+            font_manager.fontManager.addfont(str(font_path))
+            font_prop = font_manager.FontProperties(
+                fname=str(font_path)
+            )
+            JAPANESE_FONT_NAME = font_prop.get_name()
+
+            matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
+            matplotlib.rcParams["font.sans-serif"] = [
+                JAPANESE_FONT_NAME
+            ]
+        else:
+            # japanize_matplotlib側の通常設定も実行。
+            if hasattr(japanize_matplotlib, "japanize"):
+                japanize_matplotlib.japanize()
+
+            JAPANESE_FONT_NAME = "IPAexGothic"
+            matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
+
+    except Exception:
+        # ローカルWindows等も考慮したフォールバック。
+        installed_names = {
+            font.name
+            for font in font_manager.fontManager.ttflist
+        }
+
+        fallback_candidates = [
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+            "IPAexGothic",
+            "IPAGothic",
+            "Yu Gothic",
+            "Meiryo",
+        ]
+
+        for candidate in fallback_candidates:
+            if candidate in installed_names:
+                JAPANESE_FONT_NAME = candidate
+                break
+
+        if JAPANESE_FONT_NAME is None:
+            JAPANESE_FONT_NAME = "DejaVu Sans"
+
+        matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
+        matplotlib.rcParams["font.sans-serif"] = [
+            JAPANESE_FONT_NAME,
+            "DejaVu Sans",
+        ]
+
+    matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+configure_japanese_matplotlib_font()
+
+
+def apply_japanese_font_to_axes(axis):
+    """
+    既に生成済みのAxesにも日本語フォントを強制適用する。
+    """
+    if not JAPANESE_FONT_NAME:
+        return
+
+    font_prop = font_manager.FontProperties(
+        family=JAPANESE_FONT_NAME
+    )
+
+    axis.title.set_fontproperties(font_prop)
+    axis.xaxis.label.set_fontproperties(font_prop)
+    axis.yaxis.label.set_fontproperties(font_prop)
+
+    for label in axis.get_xticklabels():
+        label.set_fontproperties(font_prop)
+
+    for label in axis.get_yticklabels():
+        label.set_fontproperties(font_prop)
+
+    legend = axis.get_legend()
+    if legend is not None:
+        for text_item in legend.get_texts():
+            text_item.set_fontproperties(font_prop)
+
+    for text_item in axis.texts:
+        text_item.set_fontproperties(font_prop)
 
 import folium
 from folium import Element
@@ -1087,6 +1185,16 @@ st.caption(
     "準定常ガス拡散モデルを用いてSO₂放出率を推定します。"
 )
 
+with st.expander("日本語フォント設定", expanded=False):
+    st.write(
+        "Matplotlib使用フォント："
+        f"**{JAPANESE_FONT_NAME}**"
+    )
+    st.caption(
+        "Streamlit Cloudでは japanize-matplotlib 同梱の"
+        "IPAexGothicを優先して明示登録します。"
+    )
+
 # ----------------------------
 # Sidebar: coordinates/settings
 # ----------------------------
@@ -1474,12 +1582,18 @@ if fit_result and bundle:
         s=55,
     )
     for _, row in comparison.iterrows():
-        ax.annotate(
+        annotation = ax.annotate(
             row["station"],
             (row["観測値"], row["フィット後モデル値"]),
             xytext=(4, 4),
             textcoords="offset points",
         )
+        if JAPANESE_FONT_NAME:
+            annotation.set_fontproperties(
+                font_manager.FontProperties(
+                    family=JAPANESE_FONT_NAME
+                )
+            )
     maxv = max(
         float(np.nanmax(comparison["観測値"])),
         float(np.nanmax(comparison["フィット後モデル値"])),
@@ -1490,6 +1604,10 @@ if fit_result and bundle:
     ax.set_ylabel(f"フィット後モデル値 ({fit_result['obs_unit']})")
     ax.set_title("5地点の観測値と最適モデル")
     ax.grid(alpha=0.3)
+
+    # Streamlit Cloudでも日本語フォントを確実に適用。
+    apply_japanese_font_to_axes(ax)
+
     fig.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
