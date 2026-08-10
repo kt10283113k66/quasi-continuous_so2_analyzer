@@ -9,6 +9,24 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+try:
+    import japanize_matplotlib  # noqa: F401
+except ImportError:
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = [
+        "Noto Sans CJK JP",
+        "IPAexGothic",
+        "IPAGothic",
+        "Yu Gothic",
+        "Meiryo",
+        "DejaVu Sans",
+    ]
+plt.rcParams["axes.unicode_minus"] = False
+
+import folium
+from folium import Element
+from branca.colormap import StepColormap
+from streamlit_folium import st_folium
 from scipy.spatial import cKDTree
 
 import hmac
@@ -63,6 +81,28 @@ DEFAULT_STATIONS = [
 ]
 
 WIND_DIRECTION_OFFSETS = list(range(-12, 13, 2))
+
+PPMM_COLOR_BOUNDS = [
+    10, 50, 100, 200, 300, 400, 500, 700,
+    1000, 2000, 3000, 4000, 5000, 7000,
+]
+# 添付図に合わせた淡色→黄→橙→赤→桃→紫の離散配色。
+PPMM_COLORS = [
+    "#fff7bc",  # 10–50
+    "#fee8c8",  # 50–100
+    "#fff7a8",  # 100–200
+    "#ffff66",  # 200–300
+    "#fff04a",  # 300–400
+    "#ffd34d",  # 400–500
+    "#ffbf3f",  # 500–700
+    "#ff9f43",  # 700–1000
+    "#ff6b5f",  # 1000–2000
+    "#ff7fa5",  # 2000–3000
+    "#ef7ac8",  # 3000–4000
+    "#d66bd6",  # 4000–5000
+    "#aa5abf",  # 5000–7000
+    "#6f4b8b",  # 7000+
+]
 
 
 def local_xy_m(lat, lon, origin_lat, origin_lon):
@@ -657,6 +697,373 @@ def build_best_field(
     return xx, yy, col
 
 
+
+def ppm_color(value):
+    """添付図の離散カラーバーに対応する色を返す。"""
+    if value is None or not np.isfinite(value) or value < PPMM_COLOR_BOUNDS[0]:
+        return None
+
+    for i in range(len(PPMM_COLOR_BOUNDS) - 1):
+        if PPMM_COLOR_BOUNDS[i] <= value < PPMM_COLOR_BOUNDS[i + 1]:
+            return PPMM_COLORS[i]
+
+    return PPMM_COLORS[-1]
+
+
+def make_ppm_colormap():
+    """
+    Leaflet用の段階カラーバー。
+    10未満は描画しない。
+    """
+    return StepColormap(
+        colors=PPMM_COLORS,
+        index=PPMM_COLOR_BOUNDS,
+        vmin=PPMM_COLOR_BOUNDS[0],
+        vmax=PPMM_COLOR_BOUNDS[-1],
+        caption="SO₂ column density (ppm·m)",
+    )
+
+
+def build_leaflet_model_map(
+    pattern,
+    bundle,
+    station_df,
+    fitted_slope,
+    pressure_hpa,
+    temp_c,
+    axis_distance_km,
+    map_grid_spacing_m=40,
+):
+    """
+    最適モデルをLeaflet地図へ重ねる。
+
+    - SO2濃度は離散色の半透明CircleMarker格子
+    - 主軸は点列
+    - 火口・SC観測点を重畳
+    - マウス位置のモデル濃度をLeaflet上でリアルタイム表示
+      （主軸データからJavaScript側で再計算）
+    """
+    crater_lat = float(bundle["crater_lat"])
+    crater_lon = float(bundle["crater_lon"])
+
+    fmap = folium.Map(
+        location=[crater_lat, crater_lon],
+        zoom_start=14,
+        tiles="OpenStreetMap",
+        control_scale=True,
+        prefer_canvas=True,
+    )
+
+    # ---- SO2 concentration layer ----
+    half_extent = float(axis_distance_km) * 1000.0
+    coords = np.arange(
+        -half_extent,
+        half_extent + map_grid_spacing_m,
+        float(map_grid_spacing_m),
+        dtype=float,
+    )
+    xx, yy = np.meshgrid(coords, coords)
+
+    axis = pattern["axis"]
+    tree = cKDTree(np.column_stack([axis["x_m"], axis["y_m"]]))
+    distance_to_axis, nearest = tree.query(
+        np.column_stack([xx.ravel(), yy.ravel()]),
+        k=1,
+    )
+    along = axis["distance_m"][nearest]
+    speed = axis["speed_ms"][nearest]
+
+    field_mol = model_column_mol_m2(
+        along,
+        distance_to_axis,
+        speed,
+        bundle["diffusion_mode"],
+        bundle["cy"],
+        bundle["n"],
+    )
+    valid = (along >= 1.0) & (along <= axis["distance_m"][-1])
+    field_mol = np.where(valid, field_mol, np.nan)
+
+    field_ppm = convert_model_unit(
+        field_mol,
+        "ppm·m",
+        pressure_hpa,
+        temp_c,
+    ) * float(fitted_slope)
+
+    lat_grid, lon_grid = xy_to_latlon(
+        xx.ravel(),
+        yy.ravel(),
+        crater_lat,
+        crater_lon,
+    )
+
+    concentration_group = folium.FeatureGroup(
+        name="最適モデル SO₂カラム濃度",
+        show=True,
+    )
+
+    # 表示量を抑えるため、10 ppm·m以上のみ描画。
+    for lat, lon, value in zip(
+        lat_grid,
+        lon_grid,
+        field_ppm,
+    ):
+        color = ppm_color(value)
+        if color is None:
+            continue
+        folium.CircleMarker(
+            location=[float(lat), float(lon)],
+            radius=3.2,
+            stroke=False,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.56,
+            tooltip=f"{float(value):.1f} ppm·m",
+        ).add_to(concentration_group)
+
+    concentration_group.add_to(fmap)
+
+    # ---- plume centerline points ----
+    axis_group = folium.FeatureGroup(name="プルーム主軸（点）", show=True)
+    axis_lat, axis_lon = xy_to_latlon(
+        axis["x_m"],
+        axis["y_m"],
+        crater_lat,
+        crater_lon,
+    )
+    for index, (lat, lon, distance_m) in enumerate(
+        zip(axis_lat, axis_lon, axis["distance_m"])
+    ):
+        folium.CircleMarker(
+            location=[float(lat), float(lon)],
+            radius=3.2,
+            color="#111111",
+            weight=1,
+            fill=True,
+            fill_color="#ffffff",
+            fill_opacity=1.0,
+            tooltip=f"主軸 {float(distance_m)/1000.0:.2f} km",
+        ).add_to(axis_group)
+    axis_group.add_to(fmap)
+
+    # ---- crater ----
+    folium.Marker(
+        [crater_lat, crater_lon],
+        tooltip="火口",
+        popup=(
+            f"火口<br>緯度 {crater_lat:.6f}<br>"
+            f"経度 {crater_lon:.6f}"
+        ),
+        icon=folium.Icon(color="red", icon="fire", prefix="fa"),
+    ).add_to(fmap)
+
+    # ---- stations ----
+    station_group = folium.FeatureGroup(name="SC観測点", show=True)
+    for _, row in station_df.iterrows():
+        folium.CircleMarker(
+            location=[
+                float(row["latitude"]),
+                float(row["longitude"]),
+            ],
+            radius=7,
+            color="#000000",
+            weight=1.5,
+            fill=True,
+            fill_color="#ffffff",
+            fill_opacity=1.0,
+            tooltip=str(row["station"]),
+            popup=(
+                f"{row['station']}<br>"
+                f"緯度 {row['latitude']:.6f}<br>"
+                f"経度 {row['longitude']:.6f}<br>"
+                f"標高 {row['height_m']:.0f} m"
+            ),
+        ).add_to(station_group)
+    station_group.add_to(fmap)
+
+    # ---- requested discrete legend ----
+    legend_items = [
+        ("10–50", PPMM_COLORS[0]),
+        ("50–100", PPMM_COLORS[1]),
+        ("100–200", PPMM_COLORS[2]),
+        ("200–300", PPMM_COLORS[3]),
+        ("300–400", PPMM_COLORS[4]),
+        ("400–500", PPMM_COLORS[5]),
+        ("500–700", PPMM_COLORS[6]),
+        ("700–1000", PPMM_COLORS[7]),
+        ("1000–2000", PPMM_COLORS[8]),
+        ("2000–3000", PPMM_COLORS[9]),
+        ("3000–4000", PPMM_COLORS[10]),
+        ("4000–5000", PPMM_COLORS[11]),
+        ("5000–7000", PPMM_COLORS[12]),
+        ("7000–", PPMM_COLORS[13]),
+    ]
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 35px;
+        right: 15px;
+        z-index: 9999;
+        background: rgba(255,255,255,0.94);
+        padding: 10px 12px;
+        border: 1px solid #777;
+        border-radius: 4px;
+        font-size: 12px;
+        line-height: 1.15;
+        box-shadow: 0 1px 5px rgba(0,0,0,0.25);
+    ">
+      <div style="font-weight:700; font-size:14px; margin-bottom:5px;">ppm·m</div>
+    """
+    for label, color in legend_items:
+        legend_html += (
+            '<div style="display:flex;align-items:center;margin:1px 0;">'
+            f'<span style="display:inline-block;width:22px;height:13px;'
+            f'background:{color};margin-right:6px;"></span>'
+            f'<span>{label}</span></div>'
+        )
+    legend_html += "</div>"
+    fmap.get_root().html.add_child(Element(legend_html))
+
+    # ---- live mouse-position concentration readout ----
+    # Calculate model value directly from the nearest centerline point in JS.
+    # This avoids embedding the 10 m raster (which would be very large).
+    axis_js = []
+    for x, y, dist, speed in zip(
+        axis["x_m"],
+        axis["y_m"],
+        axis["distance_m"],
+        axis["speed_ms"],
+    ):
+        axis_js.append(
+            {
+                "x": float(x),
+                "y": float(y),
+                "d": float(dist),
+                "v": float(speed),
+            }
+        )
+
+    emission_kg_s = (
+        ASSUMED_EMISSION_T_DAY
+        * float(fitted_slope)
+        * 1000.0
+        / 86400.0
+    )
+    emission_mol_s = emission_kg_s / SO2_MOLAR_MASS_KG_MOL
+
+    R = 8.314462618
+    temp_k = float(temp_c) + 273.15
+    pressure_pa = float(pressure_hpa) * 100.0
+    mol_to_ppmm = R * temp_k / pressure_pa * 1.0e6
+
+    map_name = fmap.get_name()
+    axis_json = str(axis_js).replace("'", '"')
+    diffusion_is_wind = bundle["diffusion_mode"] == "風速依存（式11）"
+
+    mouse_js = f"""
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {{
+        var mapObj = {map_name};
+        var axisData = {axis_json};
+        var craterLat = {crater_lat};
+        var craterLon = {crater_lon};
+        var emissionMolS = {emission_mol_s};
+        var molToPpmm = {mol_to_ppmm};
+        var cy = {float(bundle["cy"])};
+        var n = {float(bundle["n"])};
+        var windDependent = {str(diffusion_is_wind).lower()};
+        var maxDistance = {float(axis["distance_m"][-1])};
+
+        var info = L.control({{position: 'topright'}});
+        info.onAdd = function(map) {{
+            this._div = L.DomUtil.create('div', 'mouse-so2-info');
+            this._div.style.background = 'rgba(255,255,255,0.94)';
+            this._div.style.padding = '8px 10px';
+            this._div.style.border = '1px solid #777';
+            this._div.style.borderRadius = '4px';
+            this._div.style.fontSize = '13px';
+            this._div.style.minWidth = '180px';
+            this._div.innerHTML = '<b>マウス位置のSO₂</b><br>地図上にカーソルを移動';
+            return this._div;
+        }};
+        info.addTo(mapObj);
+
+        function localXY(lat, lon) {{
+            var y = (lat - craterLat) * 111320.0;
+            var x = (lon - craterLon) * 111320.0 *
+                    Math.cos(craterLat * Math.PI / 180.0);
+            return [x, y];
+        }}
+
+        function sigmaY(distance, speed) {{
+            var x = Math.max(distance, 1.0);
+            var v = Math.max(speed, 0.1);
+            if (windDependent) {{
+                return 0.045 * (23.0 / v + 4.75) * Math.pow(x, 0.86);
+            }}
+            return (cy / Math.sqrt(2.0)) *
+                   Math.pow(x, 1.0 - n / 2.0);
+        }}
+
+        mapObj.on('mousemove', function(e) {{
+            var xy = localXY(e.latlng.lat, e.latlng.lng);
+            var x = xy[0], y = xy[1];
+
+            var best = null;
+            var bestD2 = Infinity;
+            for (var i = 0; i < axisData.length; i++) {{
+                var dx = x - axisData[i].x;
+                var dy = y - axisData[i].y;
+                var d2 = dx*dx + dy*dy;
+                if (d2 < bestD2) {{
+                    bestD2 = d2;
+                    best = axisData[i];
+                }}
+            }}
+
+            var valueText = '範囲外';
+            if (best && best.d >= 1.0 && best.d <= maxDistance) {{
+                var cross = Math.sqrt(bestD2);
+                var sy = sigmaY(best.d, best.v);
+                var molm2 =
+                    emissionMolS /
+                    (Math.sqrt(2.0*Math.PI) * Math.max(sy,1.0) *
+                     Math.max(best.v,0.1)) *
+                    Math.exp(-(cross*cross)/(2.0*sy*sy));
+                var ppmm = molm2 * molToPpmm;
+                if (isFinite(ppmm)) {{
+                    valueText = ppmm.toFixed(1) + ' ppm·m';
+                }}
+            }}
+
+            info._div.innerHTML =
+                '<b>マウス位置のSO₂</b><br>' +
+                valueText +
+                '<br><span style="font-size:11px;">' +
+                e.latlng.lat.toFixed(5) + ', ' +
+                e.latlng.lng.toFixed(5) + '</span>';
+        }});
+    }});
+    </script>
+    """
+    fmap.get_root().html.add_child(Element(mouse_js))
+
+    folium.LayerControl(collapsed=False).add_to(fmap)
+
+    # Fit around crater + stations + axis.
+    bounds = [
+        [float(np.min(np.r_[axis_lat, station_df["latitude"].to_numpy()])),
+         float(np.min(np.r_[axis_lon, station_df["longitude"].to_numpy()]))],
+        [float(np.max(np.r_[axis_lat, station_df["latitude"].to_numpy()])),
+         float(np.max(np.r_[axis_lon, station_df["longitude"].to_numpy()]))],
+    ]
+    fmap.fit_bounds(bounds, padding=(30, 30))
+
+    return fmap
+
+
+
 def load_default_stations():
     return pd.DataFrame(DEFAULT_STATIONS)
 
@@ -1087,85 +1494,44 @@ if fit_result and bundle:
     st.pyplot(fig)
     plt.close(fig)
 
-    # Best model field
-    st.markdown("### 最適モデルのSO₂カラム濃度分布")
+    # Best model field: Leaflet map
+    st.markdown("### 最適モデルのSO₂カラム濃度分布（Leaflet地図）")
+    st.caption(
+        "背景地図上に最適モデルのSO₂カラム濃度を重ねています。"
+        "主軸は白抜きの点列、SC観測点は白色の四角相当マーカーで表示します。"
+        "地図上でマウスを動かすと、右上にその位置のモデルカラム濃度が表示されます。"
+    )
+
     try:
-        with st.spinner("最適パターンの10 m格子分布を作成しています…"):
-            xx, yy, field_mol = build_best_field(
-                best_pattern,
-                bundle["crater_lat"],
-                bundle["crater_lon"],
-                bundle["diffusion_mode"],
-                bundle["cy"],
-                bundle["n"],
-                bundle["axis_distance_km"],
-                int(grid_spacing_m),
-            )
-            field_display = convert_model_unit(
-                field_mol,
-                fit_result["obs_unit"],
-                fit_result["pressure_hpa"],
-                fit_result["temp_c"],
-            )
-            # 1000 t/day場を推定放出率へスケール
-            field_display = field_display * float(best_row["回帰傾き"])
-
-        fig2, ax2 = plt.subplots(figsize=(8, 7))
-        finite = np.isfinite(field_display)
-        if np.any(finite):
-            contour = ax2.contourf(
-                xx / 1000.0,
-                yy / 1000.0,
-                field_display,
-                levels=20,
-            )
-            cbar = fig2.colorbar(contour, ax=ax2)
-            cbar.set_label(f"SO₂カラム濃度 ({fit_result['obs_unit']})")
-
-        axis = best_pattern["axis"]
-        ax2.plot(
-            axis["x_m"] / 1000.0,
-            axis["y_m"] / 1000.0,
-            linewidth=2.0,
-            label="ガス主軸",
-        )
-        ax2.scatter([0], [0], marker="^", s=90, label="火口")
-
-        sx, sy = local_xy_m(
-            station_df["latitude"].to_numpy(),
-            station_df["longitude"].to_numpy(),
-            bundle["crater_lat"],
-            bundle["crater_lon"],
-        )
-        ax2.scatter(
-            sx / 1000.0,
-            sy / 1000.0,
-            marker="s",
-            s=65,
-            label="SC観測点",
-        )
-        for i, row in station_df.iterrows():
-            ax2.annotate(
-                row["station"],
-                (sx[i] / 1000.0, sy[i] / 1000.0),
-                xytext=(4, 4),
-                textcoords="offset points",
+        with st.spinner("Leaflet地図を作成しています…"):
+            model_map = build_leaflet_model_map(
+                pattern=best_pattern,
+                bundle=bundle,
+                station_df=station_df,
+                fitted_slope=float(best_row["回帰傾き"]),
+                pressure_hpa=fit_result["pressure_hpa"],
+                temp_c=fit_result["temp_c"],
+                axis_distance_km=bundle["axis_distance_km"],
+                map_grid_spacing_m=max(
+                    20,
+                    min(60, int(grid_spacing_m) * 2),
+                ),
             )
 
-        ax2.set_aspect("equal", adjustable="box")
-        ax2.set_xlabel("東西距離 (km)")
-        ax2.set_ylabel("南北距離 (km)")
-        ax2.set_title(
-            f"最適モデル: {best_pattern['pressure_hpa']} hPa, "
-            f"火口風向補正 {best_pattern['wind_offset_deg']:+.0f}°"
+        st_folium(
+            model_map,
+            height=720,
+            use_container_width=True,
+            returned_objects=[],
         )
-        ax2.legend()
-        ax2.grid(alpha=0.25)
-        fig2.tight_layout()
-        st.pyplot(fig2)
-        plt.close(fig2)
+
+        st.caption(
+            "カラーバーは添付図に合わせ、10、50、100、200、300、400、"
+            "500、700、1000、2000、3000、4000、5000、7000 ppm·mを"
+            "境界とする離散表示です。10 ppm·m未満は地図上に描画しません。"
+        )
     except Exception as error:
-        st.warning(f"最適モデル分布図の作成に失敗しました：{error}")
+        st.warning(f"Leafletモデル地図の作成に失敗しました：{error}")
 
     with st.expander("全パターンの回帰結果"):
         display_df = results_df.sort_values(

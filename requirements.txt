@@ -3,3 +3,7 @@ numpy>=1.26,<3
 pandas>=2.2,<3
 scipy>=1.14,<2
 matplotlib>=3.9,<4
+japanize-matplotlib
+folium
+streamlit-folium
+branca
