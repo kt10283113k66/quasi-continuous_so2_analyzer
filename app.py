@@ -17,75 +17,77 @@ JAPANESE_FONT_NAME = None
 
 def configure_japanese_matplotlib_font():
     """
-    Streamlit Cloudでも日本語が文字化けしないよう、
-    japanize-matplotlib同梱のIPAexGothicをMatplotlibへ明示登録する。
+    Streamlit Cloudでは packages.txt から fonts-noto-cjk を導入し、
+    Noto Sans CJK JP を優先して明示使用する。
     """
     global JAPANESE_FONT_NAME
 
+    # Aptで導入したフォントをMatplotlibへ再スキャン。
     try:
-        import japanize_matplotlib
-
-        # japanize-matplotlibパッケージ内のfontsフォルダを直接探す。
-        package_dir = Path(japanize_matplotlib.__file__).resolve().parent
-        font_candidates = [
-            package_dir / "fonts" / "ipaexg.ttf",
-            package_dir / "fonts" / "IPAexGothic.ttf",
-        ]
-
-        font_path = next(
-            (path for path in font_candidates if path.exists()),
-            None,
+        font_paths = font_manager.findSystemFonts(
+            fontpaths=None,
+            fontext="ttf",
+        ) + font_manager.findSystemFonts(
+            fontpaths=None,
+            fontext="ttc",
         )
 
-        if font_path is not None:
-            font_manager.fontManager.addfont(str(font_path))
-            font_prop = font_manager.FontProperties(
-                fname=str(font_path)
-            )
-            JAPANESE_FONT_NAME = font_prop.get_name()
-
-            matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
-            matplotlib.rcParams["font.sans-serif"] = [
-                JAPANESE_FONT_NAME
-            ]
-        else:
-            # japanize_matplotlib側の通常設定も実行。
-            if hasattr(japanize_matplotlib, "japanize"):
-                japanize_matplotlib.japanize()
-
-            JAPANESE_FONT_NAME = "IPAexGothic"
-            matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
-
+        for font_path in font_paths:
+            try:
+                font_manager.fontManager.addfont(font_path)
+            except Exception:
+                pass
     except Exception:
-        # ローカルWindows等も考慮したフォールバック。
-        installed_names = {
-            font.name
-            for font in font_manager.fontManager.ttflist
-        }
+        pass
 
-        fallback_candidates = [
-            "Noto Sans CJK JP",
-            "Noto Sans JP",
-            "IPAexGothic",
-            "IPAGothic",
-            "Yu Gothic",
-            "Meiryo",
+    installed_names = {
+        font.name
+        for font in font_manager.fontManager.ttflist
+    }
+
+    # Streamlit Cloudでは fonts-noto-cjk で通常この名前が利用可能。
+    preferred = [
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPAexGothic",
+        "IPAGothic",
+        "Yu Gothic",
+        "Meiryo",
+    ]
+
+    for candidate in preferred:
+        if candidate in installed_names:
+            JAPANESE_FONT_NAME = candidate
+            break
+
+    # 名前で拾えない場合は、Noto CJKの実ファイルを直接探索する。
+    if JAPANESE_FONT_NAME is None:
+        noto_paths = [
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf"),
         ]
 
-        for candidate in fallback_candidates:
-            if candidate in installed_names:
-                JAPANESE_FONT_NAME = candidate
-                break
+        for font_path in noto_paths:
+            if font_path.exists():
+                try:
+                    font_manager.fontManager.addfont(str(font_path))
+                    prop = font_manager.FontProperties(
+                        fname=str(font_path)
+                    )
+                    JAPANESE_FONT_NAME = prop.get_name()
+                    break
+                except Exception:
+                    pass
 
-        if JAPANESE_FONT_NAME is None:
-            JAPANESE_FONT_NAME = "DejaVu Sans"
+    if JAPANESE_FONT_NAME is None:
+        JAPANESE_FONT_NAME = "DejaVu Sans"
 
-        matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
-        matplotlib.rcParams["font.sans-serif"] = [
-            JAPANESE_FONT_NAME,
-            "DejaVu Sans",
-        ]
-
+    matplotlib.rcParams["font.family"] = JAPANESE_FONT_NAME
+    matplotlib.rcParams["font.sans-serif"] = [
+        JAPANESE_FONT_NAME,
+        "DejaVu Sans",
+    ]
     matplotlib.rcParams["axes.unicode_minus"] = False
 
 
@@ -94,7 +96,7 @@ configure_japanese_matplotlib_font()
 
 def apply_japanese_font_to_axes(axis):
     """
-    既に生成済みのAxesにも日本語フォントを強制適用する。
+    Axes内の日本語文字列に選択フォントを明示適用する。
     """
     if not JAPANESE_FONT_NAME:
         return
@@ -120,6 +122,7 @@ def apply_japanese_font_to_axes(axis):
 
     for text_item in axis.texts:
         text_item.set_fontproperties(font_prop)
+
 
 import folium
 from folium import Element
