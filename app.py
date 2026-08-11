@@ -1262,7 +1262,7 @@ with st.sidebar:
     grid_spacing_m = st.selectbox(
         "最適モデル図の格子間隔",
         options=[10, 20, 25, 50],
-        index=0,
+        index=3,
         format_func=lambda v: f"{v} m",
     )
 
