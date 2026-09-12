@@ -126,12 +126,10 @@ def apply_japanese_font_to_axes(axis):
 
 import folium
 from folium import Element
-from branca.colormap import StepColormap
 from streamlit_folium import st_folium
 from scipy.spatial import cKDTree
 
 import hmac
-import streamlit as st
 
 def check_password():
     if st.session_state.get("password_correct", False):
@@ -160,14 +158,12 @@ if not check_password():
     st.stop()
 
 
-
 SO2_MOLAR_MASS_KG_MOL = 0.064066
 ASSUMED_EMISSION_T_DAY = 1000.0
 
 DEFAULT_CRATER_LAT = 32.8847282
 DEFAULT_CRATER_LON = 131.0848191
-# 旧アプリの手入力排出高度の初期値を踏襲。
-# 全カラム積分では濃度式そのものには依存しないが、解析条件として保持する。
+# 全カラム積分では排出高度は濃度式に直接影響しないため、解析条件として保持する。
 DEFAULT_CRATER_ALT_M = 2000.0
 
 GPV_NORTH = 47.6
@@ -187,7 +183,7 @@ PPMM_COLOR_BOUNDS = [
     10, 50, 100, 200, 300, 400, 500, 700,
     1000, 2000, 3000, 4000, 5000, 7000,
 ]
-# 添付図に合わせた淡色→黄→橙→赤→桃→紫の離散配色。
+# ppm·mの離散表示色。
 PPMM_COLORS = [
     "#fff7bc",  # 10–50
     "#fee8c8",  # 50–100
@@ -284,7 +280,6 @@ def read_uploaded_text(uploaded_file):
 
 @st.cache_data(show_spinner=False)
 def load_gpv_array(file_bytes: bytes):
-    # np.loadtxtはBytesIOを直接読める
     return np.loadtxt(io.BytesIO(file_bytes), dtype=np.float32)
 
 
@@ -451,7 +446,6 @@ def interpolate_idw_wind(field, x_m, y_m, radius_m=10_000.0):
 
 def rotate_uv(u, v, degrees):
     theta = math.radians(degrees)
-    # x=east, y=north のベクトルを反時計回りに回転
     return (
         u * math.cos(theta) - v * math.sin(theta),
         u * math.sin(theta) + v * math.cos(theta),
@@ -477,7 +471,7 @@ def calculate_main_axis(
     distances = [0.0]
     speeds = [speed0]
 
-    # 起点の火口風だけに方向誤差を与え、第1ステップへ反映。
+    # 火口風の方向補正は第1ステップに適用する。
     first_u, first_v = rotate_uv(u0, v0, initial_direction_offset_deg)
     x1 = first_u * delta_t
     y1 = first_v * delta_t
@@ -523,7 +517,6 @@ def sigma_y_values(distance_m, wind_speed_ms, mode, cy, n):
     if mode == "風速依存（式11）":
         return 0.045 * (23.0 / v + 4.75) * x ** 0.86
 
-    # Sutton式(9)
     return (float(cy) / np.sqrt(2.0)) * x ** (1.0 - float(n) / 2.0)
 
 
@@ -581,7 +574,6 @@ def point_model_values(stations, axis, diffusion_mode, cy, n):
         n,
     )
 
-    # 火口より風上相当、または主軸計算距離外は0
     values = np.where(
         (along >= 1.0) & (along <= axis["distance_m"][-1]),
         values,
@@ -595,9 +587,7 @@ def convert_model_unit(values_mol_m2, obs_unit, pressure_hpa, temp_c):
     if obs_unit == "mol/m²":
         return values_mol_m2
 
-    # 理想気体近似:
-    # mol/m2 = (P/RT) * 1e-6 * ppm*m
-    # => ppm*m = mol/m2 * RT/P * 1e6
+    # 理想気体近似で mol/m² → ppm·m を換算。
     R = 8.314462618
     temperature_k = temp_c + 273.15
     pressure_pa = pressure_hpa * 100.0
@@ -689,7 +679,7 @@ def build_pattern_cache(
                     "crater_speed_ms": axis["crater_speed_ms"],
                     "crater_u_ms": axis["crater_u_ms"],
                     "crater_v_ms": axis["crater_v_ms"],
-                    "cz": cz,  # 全カラム積分では結果に現れないが解析条件として保持
+                    "cz": cz,
                 }
             )
     return patterns
@@ -751,54 +741,6 @@ def evaluate_patterns(patterns, observations, obs_unit, pressure_hpa, temp_c):
     return df, best_index
 
 
-def build_best_field(
-    pattern,
-    crater_lat,
-    crater_lon,
-    diffusion_mode,
-    cy,
-    n,
-    axis_distance_km,
-    grid_spacing_m,
-):
-    half_extent = axis_distance_km * 1000.0
-    coords = np.arange(
-        -half_extent,
-        half_extent + grid_spacing_m,
-        grid_spacing_m,
-        dtype=float,
-    )
-    xx, yy = np.meshgrid(coords, coords)
-
-    axis = pattern["axis"]
-    tree = cKDTree(
-        np.column_stack([axis["x_m"], axis["y_m"]])
-    )
-    distance_to_axis, nearest = tree.query(
-        np.column_stack([xx.ravel(), yy.ravel()]),
-        k=1,
-    )
-    along = axis["distance_m"][nearest]
-    speed = axis["speed_ms"][nearest]
-
-    col = model_column_mol_m2(
-        along,
-        distance_to_axis,
-        speed,
-        diffusion_mode,
-        cy,
-        n,
-    )
-    col = col.reshape(xx.shape)
-    valid = (
-        (along.reshape(xx.shape) >= 1.0)
-        & (along.reshape(xx.shape) <= axis["distance_m"][-1])
-    )
-    col = np.where(valid, col, np.nan)
-    return xx, yy, col
-
-
-
 def ppm_color(value):
     """添付図の離散カラーバーに対応する色を返す。"""
     if value is None or not np.isfinite(value) or value < PPMM_COLOR_BOUNDS[0]:
@@ -809,20 +751,6 @@ def ppm_color(value):
             return PPMM_COLORS[i]
 
     return PPMM_COLORS[-1]
-
-
-def make_ppm_colormap():
-    """
-    Leaflet用の段階カラーバー。
-    10未満は描画しない。
-    """
-    return StepColormap(
-        colors=PPMM_COLORS,
-        index=PPMM_COLOR_BOUNDS,
-        vmin=PPMM_COLOR_BOUNDS[0],
-        vmax=PPMM_COLOR_BOUNDS[-1],
-        caption="SO₂ column density (ppm·m)",
-    )
 
 
 def build_leaflet_model_map(
@@ -933,8 +861,8 @@ def build_leaflet_model_map(
         crater_lat,
         crater_lon,
     )
-    for index, (lat, lon, distance_m) in enumerate(
-        zip(axis_lat, axis_lon, axis["distance_m"])
+    for lat, lon, distance_m in zip(
+        axis_lat, axis_lon, axis["distance_m"]
     ):
         folium.CircleMarker(
             location=[float(lat), float(lon)],
@@ -1026,9 +954,7 @@ def build_leaflet_model_map(
     legend_html += "</div>"
     fmap.get_root().html.add_child(Element(legend_html))
 
-    # ---- live mouse-position concentration readout ----
-    # Calculate model value directly from the nearest centerline point in JS.
-    # This avoids embedding the 10 m raster (which would be very large).
+    # マウス位置の濃度はJavaScript側で主軸最近傍から再計算する。
     axis_js = []
     for x, y, dist, speed in zip(
         axis["x_m"],
@@ -1152,7 +1078,6 @@ def build_leaflet_model_map(
 
     folium.LayerControl(collapsed=False).add_to(fmap)
 
-    # Fit around crater + stations + axis.
     bounds = [
         [float(np.min(np.r_[axis_lat, station_df["latitude"].to_numpy()])),
          float(np.min(np.r_[axis_lon, station_df["longitude"].to_numpy()]))],
@@ -1162,7 +1087,6 @@ def build_leaflet_model_map(
     fmap.fit_bounds(bounds, padding=(30, 30))
 
     return fmap
-
 
 
 def load_default_stations():
@@ -1194,8 +1118,8 @@ with st.expander("日本語フォント設定", expanded=False):
         f"**{JAPANESE_FONT_NAME}**"
     )
     st.caption(
-        "Streamlit Cloudでは japanize-matplotlib 同梱の"
-        "IPAexGothicを優先して明示登録します。"
+        "Streamlit Cloudでは packages.txt で導入した"
+        "Noto Sans CJK JPを優先して使用します。"
     )
 
 # ----------------------------
