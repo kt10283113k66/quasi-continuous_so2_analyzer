@@ -1285,17 +1285,10 @@ st.dataframe(
     hide_index=True,
 )
 
-st.subheader("2. 解析条件")
-st.caption(
-    "火口位置、拡散パラメータ、主軸計算距離などの解析条件を確認します。"
-    "SC1～SC5の観測カラム濃度は、GPVモデルを確認した後の"
-    "「4. 放出率Fitting」で入力します。"
-)
-
 # ----------------------------
 # GPV upload
 # ----------------------------
-st.subheader("3. GPV風データ・モデル事前確認")
+st.subheader("2. GPV風データ・モデル事前確認")
 uploaded_gpv = st.file_uploader(
     "u・v成分のtxtファイルをまとめてドラッグ＆ドロップ",
     type=["txt"],
@@ -1424,7 +1417,7 @@ if model_button:
 bundle = st.session_state.get("model_bundle")
 
 if bundle is not None:
-    st.markdown("### 3-1. 計算済みモデル一覧")
+    st.markdown("### 2-1. 計算済みモデル一覧")
 
     model_summary_df = summarize_model_patterns(
         bundle["patterns"],
@@ -1453,7 +1446,7 @@ if bundle is not None:
         use_container_width=True,
     )
 
-    st.markdown("### 3-2. 風向補正0°の濃度分布")
+    st.markdown("### 2-2. 風向補正0°の濃度分布")
     st.caption(
         "各気圧面について、火口風向補正0°・仮定放出率1000 t/dayの"
         "モデル濃度分布を表示します。"
@@ -1536,12 +1529,12 @@ if bundle is not None:
 # ----------------------------
 # Fitting
 # ----------------------------
-st.subheader("4. 放出率Fitting")
+st.subheader("3. 放出率Fitting")
 bundle = st.session_state.get("model_bundle")
 
 if bundle is None:
     st.info(
-        "先に「3. GPV風データ・モデル事前確認」で"
+        "先に「2. GPV風データ・モデル事前確認」で"
         "モデルパターンを計算してください。"
     )
 else:
@@ -1551,7 +1544,7 @@ else:
         "Fittingだけを実行します。"
     )
 
-    st.markdown("### 4-1. 5地点の観測カラム濃度")
+    st.markdown("### 3-1. 5地点の観測カラム濃度")
 
     unit_col, p_col, t_col = st.columns(3)
 
@@ -1890,6 +1883,6 @@ with st.expander("計算仕様"):
 - 5地点について、1000 t/dayモデル値を説明変数、観測値を目的変数として
   切片0固定回帰を行い、`推定放出率 = 1000 × 回帰傾き` とします。
 - 最適パターンはフィット後の5地点RMSEが最小となるものです。
-- GPV・モデル計算はsession_stateに保持し、観測濃度は「4. 放出率Fitting」で入力します。観測濃度を変更した場合は回帰だけ再計算します。
+- GPV・モデル計算はsession_stateに保持し、観測濃度は「3. 放出率Fitting」で入力します。観測濃度を変更した場合は回帰だけ再計算します。
 """
     )
