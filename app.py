@@ -685,6 +685,62 @@ def build_pattern_cache(
     return patterns
 
 
+def summarize_model_patterns(patterns, station_df):
+    rows = []
+
+    for index, pattern in enumerate(patterns):
+        axis = pattern["axis"]
+        end_x = float(axis["x_m"][-1])
+        end_y = float(axis["y_m"][-1])
+
+        bearing = (
+            math.degrees(math.atan2(end_x, end_y)) + 360.0
+        ) % 360.0
+
+        row = {
+            "モデルNo": index + 1,
+            "GPV": pattern["gpv_label"],
+            "気圧面_hPa": int(pattern["pressure_hpa"]),
+            "火口風向補正_deg": float(pattern["wind_offset_deg"]),
+            "火口u_m_s": float(pattern["crater_u_ms"]),
+            "火口v_m_s": float(pattern["crater_v_ms"]),
+            "火口風速_m_s": float(pattern["crater_speed_ms"]),
+            "主軸終端距離_km": float(
+                axis["distance_m"][-1]
+            ) / 1000.0,
+            "主軸終端方位_deg": float(bearing),
+        }
+
+        for station_name, value in zip(
+            station_df["station"],
+            pattern["station_model_mol_m2"],
+        ):
+            row[f"{station_name}_1000t_day_mol_m2"] = float(value)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def observation_signature(
+    observations,
+    obs_unit,
+    pressure_hpa,
+    temp_c,
+):
+    payload = (
+        list(np.asarray(observations, dtype=float))
+        + [
+            str(obs_unit),
+            float(pressure_hpa),
+            float(temp_c),
+        ]
+    )
+    return hashlib.sha256(
+        repr(payload).encode("utf-8")
+    ).hexdigest()
+
+
 def evaluate_patterns(patterns, observations, obs_unit, pressure_hpa, temp_c):
     rows = []
     for idx, pattern in enumerate(patterns):
@@ -1229,58 +1285,17 @@ st.dataframe(
     hide_index=True,
 )
 
-st.subheader("2. 5地点の観測カラム濃度")
-unit_col, p_col, t_col = st.columns(3)
-with unit_col:
-    obs_unit = st.selectbox(
-        "観測値の単位",
-        ["ppm·m", "mol/m²"],
-        index=0,
-    )
-with p_col:
-    conversion_pressure_hpa = st.number_input(
-        "ppm·m換算時の基準気圧（hPa）",
-        min_value=100.0,
-        max_value=1100.0,
-        value=900.0,
-        step=5.0,
-        disabled=obs_unit != "ppm·m",
-    )
-with t_col:
-    conversion_temp_c = st.number_input(
-        "ppm·m換算時の基準気温（℃）",
-        min_value=-50.0,
-        max_value=50.0,
-        value=15.0,
-        step=1.0,
-        disabled=obs_unit != "ppm·m",
-    )
-
+st.subheader("2. 解析条件")
 st.caption(
-    "ppm·mを選んだ場合、モデルのmol/m²値は理想気体近似で"
-    "指定した基準気圧・気温のppm·mへ換算して比較します。"
+    "火口位置、拡散パラメータ、主軸計算距離などの解析条件を確認します。"
+    "SC1～SC5の観測カラム濃度は、GPVモデルを確認した後の"
+    "「4. 放出率Fitting」で入力します。"
 )
-
-obs_cols = st.columns(len(station_df))
-observations = []
-for i, (_, row) in enumerate(station_df.iterrows()):
-    with obs_cols[i]:
-        val = st.number_input(
-            str(row["station"]),
-            min_value=0.0,
-            value=0.0,
-            step=1.0 if obs_unit == "ppm·m" else 0.0001,
-            format="%.3f" if obs_unit == "ppm·m" else "%.6f",
-            key=f"obs_{row['station']}",
-        )
-        observations.append(float(val))
-
-observations = np.asarray(observations, dtype=float)
 
 # ----------------------------
 # GPV upload
 # ----------------------------
-st.subheader("3. GPV風データ")
+st.subheader("3. GPV風データ・モデル事前確認")
 uploaded_gpv = st.file_uploader(
     "u・v成分のtxtファイルをまとめてドラッグ＆ドロップ",
     type=["txt"],
@@ -1347,7 +1362,7 @@ st.caption(
 # Model generation / cache
 # ----------------------------
 model_button = st.button(
-    "GPVからモデル39パターンを計算・保持",
+    "GPVからモデルパターンを計算・保持",
     type="primary",
     use_container_width=True,
     disabled=not bool(pairs) or not (1 <= len(selected_labels) <= 3),
@@ -1398,54 +1413,320 @@ if model_button:
         }
         st.success(
             f"{len(patterns)}パターンのモデル計算結果を保持しました。"
-            "観測濃度だけ変更して、下の再解析ボタンを押せます。"
+            "下にモデル一覧と、風向補正0°の濃度分布を表示します。"
         )
     except Exception as error:
         st.error(f"モデル計算に失敗しました：{error}")
 
 # ----------------------------
+# Model preview before fitting
+# ----------------------------
+bundle = st.session_state.get("model_bundle")
+
+if bundle is not None:
+    st.markdown("### 3-1. 計算済みモデル一覧")
+
+    model_summary_df = summarize_model_patterns(
+        bundle["patterns"],
+        bundle["station_df"],
+    )
+
+    st.caption(
+        f"選択GPV {len(bundle['selected_labels'])}組 × 風向補正13通り = "
+        f"**{len(model_summary_df)}モデル** を表示しています。"
+        "各SC地点の値は仮定放出率1000 t/dayでのモデル値です。"
+    )
+
+    st.dataframe(
+        model_summary_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.download_button(
+        "モデル計算結果CSVをダウンロード",
+        data=model_summary_df.to_csv(
+            index=False
+        ).encode("utf-8-sig"),
+        file_name="quasi_steady_model_patterns_1000t_day.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.markdown("### 3-2. 風向補正0°の濃度分布")
+    st.caption(
+        "各気圧面について、火口風向補正0°・仮定放出率1000 t/dayの"
+        "モデル濃度分布を表示します。"
+        "3気圧面を選択した場合は3枚表示します。"
+    )
+
+    preview_temp_c = st.number_input(
+        "事前確認図のppm·m換算用基準気温（℃）",
+        min_value=-50.0,
+        max_value=50.0,
+        value=15.0,
+        step=1.0,
+        key="preview_temperature_c",
+    )
+
+    zero_patterns = [
+        pattern
+        for pattern in bundle["patterns"]
+        if float(pattern["wind_offset_deg"]) == 0.0
+    ]
+
+    for map_index, preview_pattern in enumerate(
+        zero_patterns[:3]
+    ):
+        st.markdown(
+            f"#### {preview_pattern['gpv_label']} / 風向補正 0°"
+        )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "気圧面",
+            f"{preview_pattern['pressure_hpa']} hPa",
+        )
+        c2.metric(
+            "火口風速",
+            f"{preview_pattern['crater_speed_ms']:.2f} m/s",
+        )
+
+        u0 = float(preview_pattern["crater_u_ms"])
+        v0 = float(preview_pattern["crater_v_ms"])
+        bearing = (
+            math.degrees(math.atan2(u0, v0)) + 360.0
+        ) % 360.0
+        c3.metric(
+            "火口風の流下方位",
+            f"{bearing:.1f}°",
+        )
+
+        try:
+            preview_map = build_leaflet_model_map(
+                pattern=preview_pattern,
+                bundle=bundle,
+                station_df=bundle["station_df"],
+                fitted_slope=1.0,
+                pressure_hpa=float(
+                    preview_pattern["pressure_hpa"]
+                ),
+                temp_c=float(preview_temp_c),
+                axis_distance_km=float(
+                    bundle["axis_distance_km"]
+                ),
+                map_grid_spacing_m=max(
+                    20,
+                    min(60, int(grid_spacing_m) * 2),
+                ),
+            )
+
+            st_folium(
+                preview_map,
+                height=560,
+                use_container_width=True,
+                returned_objects=[],
+                key=f"preview_model_map_{map_index}",
+            )
+        except Exception as error:
+            st.warning(
+                f"事前確認地図の作成に失敗しました：{error}"
+            )
+
+# ----------------------------
 # Fitting
 # ----------------------------
-st.subheader("4. 放出率フィッティング")
+st.subheader("4. 放出率Fitting")
 bundle = st.session_state.get("model_bundle")
 
 if bundle is None:
     st.info(
-        "先にGPVファイルを読み込み、"
-        "「GPVからモデル39パターンを計算・保持」を実行してください。"
+        "先に「3. GPV風データ・モデル事前確認」で"
+        "モデルパターンを計算してください。"
     )
 else:
     st.success(
         f"モデルキャッシュあり：{len(bundle['patterns'])}パターン。"
-        "GPVを再計算せず観測濃度だけ変更できます。"
+        "観測値を変更してもGPVモデルは再計算せず、"
+        "Fittingだけを実行します。"
     )
 
-    refit = st.button(
-        "現在の観測濃度で再フィッティング",
-        use_container_width=True,
-    )
+    st.markdown("### 4-1. 5地点の観測カラム濃度")
+
+    unit_col, p_col, t_col = st.columns(3)
+
+    with unit_col:
+        obs_unit = st.selectbox(
+            "観測値の単位",
+            ["ppm·m", "mol/m²"],
+            index=0,
+            key="fit_obs_unit",
+        )
+
+    with p_col:
+        conversion_pressure_hpa = st.number_input(
+            "ppm·m換算時の基準気圧（hPa）",
+            min_value=100.0,
+            max_value=1100.0,
+            value=900.0,
+            step=5.0,
+            disabled=obs_unit != "ppm·m",
+            key="fit_conversion_pressure_hpa",
+        )
+
+    with t_col:
+        conversion_temp_c = st.number_input(
+            "ppm·m換算時の基準気温（℃）",
+            min_value=-50.0,
+            max_value=50.0,
+            value=15.0,
+            step=1.0,
+            disabled=obs_unit != "ppm·m",
+            key="fit_conversion_temp_c",
+        )
+
+    with st.form(
+        "observation_fitting_form",
+        clear_on_submit=False,
+    ):
+        obs_cols = st.columns(
+            len(bundle["station_df"])
+        )
+
+        for i, (_, row) in enumerate(
+            bundle["station_df"].iterrows()
+        ):
+            station_name = str(row["station"])
+
+            with obs_cols[i]:
+                st.number_input(
+                    station_name,
+                    min_value=0.0,
+                    value=float(
+                        st.session_state.get(
+                            f"fit_obs_value_{station_name}",
+                            0.0,
+                        )
+                    ),
+                    step=(
+                        1.0
+                        if obs_unit == "ppm·m"
+                        else 0.0001
+                    ),
+                    format=(
+                        "%.3f"
+                        if obs_unit == "ppm·m"
+                        else "%.6f"
+                    ),
+                    key=f"fit_obs_value_{station_name}",
+                )
+
+        refit = st.form_submit_button(
+            "現在の観測濃度でFitting",
+            type="primary",
+            use_container_width=True,
+        )
 
     if refit:
+        current_observations = np.asarray(
+            [
+                float(
+                    st.session_state[
+                        f"fit_obs_value_{station_name}"
+                    ]
+                )
+                for station_name
+                in bundle["station_df"]["station"]
+            ],
+            dtype=float,
+        )
+
+        current_signature = observation_signature(
+            current_observations,
+            obs_unit,
+            float(conversion_pressure_hpa),
+            float(conversion_temp_c),
+        )
+
         try:
             results_df, best_index = evaluate_patterns(
                 bundle["patterns"],
-                observations,
+                current_observations,
                 obs_unit,
                 float(conversion_pressure_hpa),
                 float(conversion_temp_c),
             )
+
             st.session_state["fit_result"] = {
                 "results_df": results_df,
                 "best_index": best_index,
-                "observations": observations.copy(),
+                "observations": current_observations.copy(),
                 "obs_unit": obs_unit,
-                "pressure_hpa": float(conversion_pressure_hpa),
-                "temp_c": float(conversion_temp_c),
+                "pressure_hpa": float(
+                    conversion_pressure_hpa
+                ),
+                "temp_c": float(
+                    conversion_temp_c
+                ),
+                "observation_signature": current_signature,
             }
+
         except Exception as error:
-            st.error(f"フィッティングに失敗しました：{error}")
+            st.session_state.pop(
+                "fit_result",
+                None,
+            )
+            st.error(
+                f"フィッティングに失敗しました：{error}"
+            )
 
 fit_result = st.session_state.get("fit_result")
+
+if fit_result and bundle:
+    current_visible_observations = np.asarray(
+        [
+            float(
+                st.session_state.get(
+                    f"fit_obs_value_{station_name}",
+                    0.0,
+                )
+            )
+            for station_name
+            in bundle["station_df"]["station"]
+        ],
+        dtype=float,
+    )
+
+    current_visible_signature = observation_signature(
+        current_visible_observations,
+        st.session_state.get(
+            "fit_obs_unit",
+            fit_result["obs_unit"],
+        ),
+        float(
+            st.session_state.get(
+                "fit_conversion_pressure_hpa",
+                fit_result["pressure_hpa"],
+            )
+        ),
+        float(
+            st.session_state.get(
+                "fit_conversion_temp_c",
+                fit_result["temp_c"],
+            )
+        ),
+    )
+
+    if (
+        current_visible_signature
+        != fit_result.get("observation_signature")
+    ):
+        st.warning(
+            "観測値または換算条件が前回Fitting時から変更されています。"
+            "旧結果は非表示にしました。"
+            "「現在の観測濃度でFitting」を押してください。"
+        )
+        fit_result = None
 
 if fit_result and bundle:
     results_df = fit_result["results_df"]
@@ -1609,6 +1890,6 @@ with st.expander("計算仕様"):
 - 5地点について、1000 t/dayモデル値を説明変数、観測値を目的変数として
   切片0固定回帰を行い、`推定放出率 = 1000 × 回帰傾き` とします。
 - 最適パターンはフィット後の5地点RMSEが最小となるものです。
-- GPV・モデル計算はsession_stateに保持し、観測濃度の変更時は回帰だけ再計算します。
+- GPV・モデル計算はsession_stateに保持し、観測濃度は「4. 放出率Fitting」で入力します。観測濃度を変更した場合は回帰だけ再計算します。
 """
     )
