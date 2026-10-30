@@ -170,11 +170,16 @@ GPV_NORTH = 47.6
 GPV_WEST = 120.0
 
 DEFAULT_STATIONS = [
-    {"station": "SC1", "latitude": 32.886104, "longitude": 131.075142, "height_m": 1141.0},
-    {"station": "SC2", "latitude": 32.887972, "longitude": 131.075713, "height_m": 1136.0},
-    {"station": "SC3", "latitude": 32.890154, "longitude": 131.077456, "height_m": 1150.0},
-    {"station": "SC4", "latitude": 32.891062, "longitude": 131.079561, "height_m": 1169.0},
-    {"station": "SC5", "latitude": 32.891685, "longitude": 131.082029, "height_m": 1179.0},
+    {"station": "SS1", "latitude": 32.874343, "longitude": 131.089361, "height_m": 1256.5},
+    {"station": "SS2", "latitude": 32.874011, "longitude": 131.087915, "height_m": 1247.1},
+    {"station": "SN4", "latitude": 32.890356, "longitude": 131.079386, "height_m": 1175.6},
+    {"station": "SN5", "latitude": 32.891172, "longitude": 131.080878, "height_m": 1175.7},
+    {"station": "SN6", "latitude": 32.8917, "longitude": 131.082038, "height_m": 1179.3},
+#    {"station": "SC1", "latitude": 32.886104, "longitude": 131.075142, "height_m": 1141.0},
+#    {"station": "SC2", "latitude": 32.887972, "longitude": 131.075713, "height_m": 1136.0},
+#    {"station": "SC3", "latitude": 32.890154, "longitude": 131.077456, "height_m": 1150.0},
+#    {"station": "SC4", "latitude": 32.891062, "longitude": 131.079561, "height_m": 1169.0},
+#    {"station": "SC5", "latitude": 32.891685, "longitude": 131.082029, "height_m": 1179.0},
 ]
 
 WIND_DIRECTION_OFFSETS = list(range(-12, 13, 2))
