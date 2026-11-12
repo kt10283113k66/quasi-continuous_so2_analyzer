@@ -159,6 +159,10 @@ if not check_password():
 
 
 SO2_MOLAR_MASS_KG_MOL = 0.064066
+# 固定条件（25℃、1 atm＝1013.25 hPa）での固定換算係数
+STANDARD_TEMP_C = 25.0
+STANDARD_PRESSURE_HPA = 1013.25
+MOL_M2_TO_PPMM = 8.314462618 * 298.15 / 101325.0 * 1.0e6
 ASSUMED_EMISSION_T_DAY = 1000.0
 
 DEFAULT_CRATER_LAT = 32.8847282
@@ -593,11 +597,8 @@ def convert_model_unit(values_mol_m2, obs_unit, pressure_hpa, temp_c):
         return values_mol_m2
 
     # 理想気体近似で mol/m² → ppm·m を換算。
-    R = 8.314462618
-    temperature_k = temp_c + 273.15
-    pressure_pa = pressure_hpa * 100.0
-    factor = R * temperature_k / pressure_pa * 1.0e6
-    return values_mol_m2 * factor
+    # 引数は既存の呼び出しとの互換性のため保持し、換算は25℃・1 atmに固定。
+    return values_mol_m2 * MOL_M2_TO_PPMM
 
 
 def fit_zero_intercept(model_1000, observed):
@@ -1040,10 +1041,7 @@ def build_leaflet_model_map(
     )
     emission_mol_s = emission_kg_s / SO2_MOLAR_MASS_KG_MOL
 
-    R = 8.314462618
-    temp_k = float(temp_c) + 273.15
-    pressure_pa = float(pressure_hpa) * 100.0
-    mol_to_ppmm = R * temp_k / pressure_pa * 1.0e6
+    mol_to_ppmm = MOL_M2_TO_PPMM
 
     map_name = fmap.get_name()
     axis_json = str(axis_js).replace("'", '"')
@@ -1458,14 +1456,8 @@ if bundle is not None:
         "3気圧面を選択した場合は3枚表示します。"
     )
 
-    preview_temp_c = st.number_input(
-        "事前確認図のppm·m換算用基準気温（℃）",
-        min_value=-50.0,
-        max_value=50.0,
-        value=15.0,
-        step=1.0,
-        key="preview_temperature_c",
-    )
+    preview_temp_c = STANDARD_TEMP_C
+    st.caption(f"ppm·m換算：固定条件（25℃、1 atm＝1013.25 hPa）、1 mol/m² = {MOL_M2_TO_PPMM:,.2f} ppm·m（固定）")
 
     zero_patterns = [
         pattern
@@ -1506,9 +1498,7 @@ if bundle is not None:
                 bundle=bundle,
                 station_df=bundle["station_df"],
                 fitted_slope=1.0,
-                pressure_hpa=float(
-                    preview_pattern["pressure_hpa"]
-                ),
+                pressure_hpa=STANDARD_PRESSURE_HPA,
                 temp_c=float(preview_temp_c),
                 axis_distance_km=float(
                     bundle["axis_distance_km"]
@@ -1551,37 +1541,18 @@ else:
 
     st.markdown("### 3-1. 5地点の観測カラム濃度")
 
-    unit_col, p_col, t_col = st.columns(3)
-
-    with unit_col:
-        obs_unit = st.selectbox(
-            "観測値の単位",
-            ["ppm·m", "mol/m²"],
-            index=0,
-            key="fit_obs_unit",
-        )
-
-    with p_col:
-        conversion_pressure_hpa = st.number_input(
-            "ppm·m換算時の基準気圧（hPa）",
-            min_value=100.0,
-            max_value=1100.0,
-            value=900.0,
-            step=5.0,
-            disabled=obs_unit != "ppm·m",
-            key="fit_conversion_pressure_hpa",
-        )
-
-    with t_col:
-        conversion_temp_c = st.number_input(
-            "ppm·m換算時の基準気温（℃）",
-            min_value=-50.0,
-            max_value=50.0,
-            value=15.0,
-            step=1.0,
-            disabled=obs_unit != "ppm·m",
-            key="fit_conversion_temp_c",
-        )
+    obs_unit = st.selectbox(
+        "観測値の単位",
+        ["ppm·m", "mol/m²"],
+        index=0,
+        key="fit_obs_unit",
+    )
+    conversion_pressure_hpa = STANDARD_PRESSURE_HPA
+    conversion_temp_c = STANDARD_TEMP_C
+    st.caption(
+        f"ppm·m換算は固定条件（25℃、1 atm＝1013.25 hPa）に固定："
+        f"1 mol/m² = {MOL_M2_TO_PPMM:,.2f} ppm·m"
+    )
 
     with st.form(
         "observation_fitting_form",
@@ -1701,18 +1672,8 @@ if fit_result and bundle:
             "fit_obs_unit",
             fit_result["obs_unit"],
         ),
-        float(
-            st.session_state.get(
-                "fit_conversion_pressure_hpa",
-                fit_result["pressure_hpa"],
-            )
-        ),
-        float(
-            st.session_state.get(
-                "fit_conversion_temp_c",
-                fit_result["temp_c"],
-            )
-        ),
+        STANDARD_PRESSURE_HPA,
+        STANDARD_TEMP_C,
     )
 
     if (
@@ -1878,6 +1839,7 @@ with st.expander("計算仕様"):
     st.markdown(
         """
 - 仮定SO₂放出率は **1000 t/day** 固定です。
+- mol/m²からppm·mへの換算は固定条件（25℃、1 atm＝1013.25 hPa）で固定し、GPV気圧面には依存しません。
 - ガス主軸は河波ら（2023）の準定常モデルの考え方に基づき、
   火口風速から `V0 × Δt = 100 m` となる時間刻みで逐次計算します。
 - GPV風は各主軸点の周囲10 km以内を距離二乗逆数で内挿します。
