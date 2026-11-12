@@ -721,7 +721,7 @@ def summarize_model_patterns(patterns, station_df):
             station_df["station"],
             pattern["station_model_mol_m2"],
         ):
-            row[f"{station_name}_1000t_day_mol_m2"] = float(value)
+            row[f"{station_name}_1000t_day_ppmm"] = float(value) * MOL_M2_TO_PPMM
 
         rows.append(row)
 
@@ -1430,7 +1430,7 @@ if bundle is not None:
     st.caption(
         f"選択GPV {len(bundle['selected_labels'])}組 × 風向補正13通り = "
         f"**{len(model_summary_df)}モデル** を表示しています。"
-        "各SC地点の値は仮定放出率1000 t/dayでのモデル値です。"
+        "各SC地点の値は仮定放出率1000 t/dayでのモデル値（ppm·m、25℃・1 atm換算）です。"
     )
 
     st.dataframe(
@@ -1444,7 +1444,7 @@ if bundle is not None:
         data=model_summary_df.to_csv(
             index=False
         ).encode("utf-8-sig"),
-        file_name="quasi_steady_model_patterns_1000t_day.csv",
+        file_name="quasi_steady_model_patterns_1000t_day_ppmm.csv",
         mime="text/csv",
         use_container_width=True,
     )
